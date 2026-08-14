@@ -1,0 +1,931 @@
+// ===================================================================
+// Engineering Calculator - C Program
+// Author: Pouria Azedi
+// Project: Electrical Engineering Project
+// Description: A command-line scientific calculator that supports
+//              arithmetic, scientific functions, history, angle mode
+//              (radian/degree), and ASCII graph plotting.
+// ===================================================================
+
+// Pouria_Azedi_Electrical Engineering Project_ C Program 
+
+// Standard input/output functions (printf, scanf, fgets, etc.)
+#include <stdio.h>
+
+// Disable MSVC secure warnings (no effect on GCC/Clang)
+#define _CRT_SECURE_NO_WARNINGS	
+
+// Character handling functions (isspace, isdigit, isalpha, etc.)
+#include <ctype.h>
+
+// Error number definitions (errno, not heavily used here)
+#include <errno.h>
+
+// Mathematical functions and constants (sin, cos, pow, log, etc.)
+#include <math.h>
+
+// Boolean type and true/false macros
+#include <stdbool.h>
+
+// Standard input/output functions (duplicate include kept from original)
+#include <stdio.h>
+
+// General utilities (malloc, free, strtod, etc.)
+#include <stdlib.h>
+
+// String manipulation functions (strcmp, strcpy, strlen, etc.)
+#include <string.h>
+
+// Time functions (time, used for random seed)
+#include <time.h>
+
+// Maximum length of an input line/expression
+#define MAX_LINE 1000
+
+// Maximum number of command-line arguments (currently unused)
+#define MAX_ARGS 100
+
+// Mathematical constant e
+#define E 2.71828182845904523536
+
+// Mathematical constant pi
+#define PI 3.14159265358979323846
+
+// ====================== STRUCTS ======================
+
+// Holds the current angle mode and previous calculation result
+struct DegreeMode {
+    bool mode;   // false = radian, true = degree
+    bool fail;   // true if angle mode input was invalid
+    double result; // stores previous result for "&" operator
+};
+
+// Structure for a single history entry (expression string and result)
+typedef struct {
+    char expression[MAX_LINE]; // expression entered by user
+    double result;             // calculated result of expression
+} HistoryEntry;
+
+// ====================== GLOBAL VARIABLE ======================
+
+// Global angle mode and previous result, initialized to radian mode
+struct DegreeMode degreeMode = { false, false, 0.0 };
+
+// ====================== FORWARD DECLARATIONS ======================
+
+// Menu and history functions
+void showMenu();
+void showHistory();
+
+// Mathematical helper functions
+double fact(int a);
+
+// Tokenizer and evaluator entry point
+double split(char* input);
+
+// History saving functions
+void save_history(char input[MAX_LINE]);
+void save_history1(double result);
+void save_history2(double result1);
+
+// Help and input functions
+void show_help();
+void get_choose();
+void calculation();
+void clearHistory();
+
+// Graph related functions
+void graph();
+char* replace_x_with_number(const char* S, double N);
+void draw_graph(double arr[41], double x_min, double x_max);
+void showGraphHistory();
+
+// Degree mode input function
+void degree();
+
+// Random number helper
+int my_random(int a);
+
+// Clear any remaining characters in the standard input buffer
+static void clear_input_buffer(void);
+
+// ====================== MAIN ======================
+
+// Program entry point: starts the main menu loop
+int main(void) {
+    get_choose();
+    return 0;
+}
+
+// ====================== MENU ======================
+
+// Display the main menu options to the user
+void showMenu(void) {
+    printf("=== Engineering Calculator ===\n");
+    printf("0. Help\n");
+    printf("1. Calculation\n");
+    printf("2. Show History\n");
+    printf("3. Clear History\n");
+    printf("4. Graph (ASCII plot)\n");
+    printf("5. Show Graph History\n");
+    printf("e. Exit\n");
+}
+
+// ====================== HISTORY ======================
+
+// Show the calculation history stored in History.txt
+void showHistory(void) {
+    // Open the history file in read mode
+    FILE* f = fopen("History.txt", "r");
+    if (!f) {
+        printf("History file not found.\n");
+        return;
+    }
+
+    char line[MAX_LINE];
+    int i = 1;
+
+    // Read each line and print it with a line number
+    while (fgets(line, MAX_LINE, f)) {
+        printf("%d: %s", i++, line);
+    }
+
+    fclose(f);
+}
+
+// ====================== MATH HELPERS ======================
+
+// Calculate factorial of a non-negative integer
+// Returns 0.0 for negative input (invalid factorial)
+double fact(int a) {
+    if (a < 0) return 0.0;
+
+    double res = 1.0;
+    for (int i = 2; i <= a; i++) {
+        res *= i;
+    }
+    return res;
+}
+
+// Generate a random integer in the range [0, a-1]
+// Seeds the random number generator only once
+int my_random(int a) {
+    if (a <= 0) return 0;
+
+    static int seeded = 0;
+    if (!seeded) {
+        srand((unsigned int)time(NULL));
+        seeded = 1;
+    }
+
+    return rand() % a;
+}
+
+// ====================== TOKENIZER & PARSER ======================
+
+// Token types produced by the tokenizer
+typedef enum {
+    TOK_NUMBER,   // numeric literal
+    TOK_IDENT,    // identifier (function name, constant, or variable)
+    TOK_OP,       // operator (+, -, *, /, ^, !, &)
+    TOK_LPAREN,   // left parenthesis '('
+    TOK_RPAREN,   // right parenthesis ')'
+    TOK_END       // end of input
+} TokenType;
+
+// Structure representing a single token
+typedef struct {
+    TokenType type;     // type of token
+    char text[128];     // original text (for identifiers/operators)
+    double value;       // numeric value if TOK_NUMBER
+} Token;
+
+// Parser state: keeps track of source string and current token
+typedef struct {
+    const char* src;    // source expression string
+    size_t pos;         // current position in source
+    Token current;      // current lookahead token
+} Parser;
+
+// Advance to the next token in the parser input
+static void next_token(Parser* p) {
+    // Skip all whitespace characters
+    while (isspace((unsigned char)p->src[p->pos])) {
+        p->pos++;
+    }
+
+    // End of string: create an END token
+    if (p->src[p->pos] == '\0') {
+        p->current.type = TOK_END;
+        p->current.text[0] = '\0';
+        p->current.value = 0.0;
+        return;
+    }
+
+    char c = p->src[p->pos];
+
+    // Number (also supports scientific notation like 1e5)
+    if (isdigit((unsigned char)c) || c == '.') {
+        char* end = NULL;
+        double val = strtod(&p->src[p->pos], &end);
+
+        // If no number could be parsed, return END
+        if (end == &p->src[p->pos]) {
+            p->current.type = TOK_END;
+            p->current.text[0] = '\0';
+            return;
+        }
+
+        p->current.type = TOK_NUMBER;
+        p->current.value = val;
+
+        // Copy the numeric text into the token text field
+        size_t len = (size_t)(end - &p->src[p->pos]);
+        if (len >= sizeof(p->current.text)) {
+            len = sizeof(p->current.text) - 1;
+        }
+        memcpy(p->current.text, &p->src[p->pos], len);
+        p->current.text[len] = '\0';
+
+        // Update parser position
+        p->pos = (size_t)(end - p->src);
+        return;
+    }
+
+    // Identifier / function name / constant
+    if (isalpha((unsigned char)c)) {
+        size_t start = p->pos;
+        while (isalnum((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_') {
+            p->pos++;
+        }
+
+        size_t len = p->pos - start;
+        if (len >= sizeof(p->current.text)) {
+            len = sizeof(p->current.text) - 1;
+        }
+        memcpy(p->current.text, &p->src[start], len);
+        p->current.text[len] = '\0';
+
+        p->current.type = TOK_IDENT;
+        p->current.value = 0.0;
+        return;
+    }
+
+    // Operators and parentheses
+    if (c == '(' || c == ')' || strchr("+-*/^!&", c)) {
+        if (c == '(') {
+            p->current.type = TOK_LPAREN;
+        }
+        else if (c == ')') {
+            p->current.type = TOK_RPAREN;
+        }
+        else {
+            p->current.type = TOK_OP;
+        }
+
+        p->current.text[0] = c;
+        p->current.text[1] = '\0';
+        p->current.value = 0.0;
+        p->pos++;
+        return;
+    }
+
+    // Unknown character: end parsing
+    p->current.type = TOK_END;
+    p->current.text[0] = '\0';
+}
+
+// Recursive descent parser function prototypes
+static double parse_expression(Parser* p);
+static double parse_term(Parser* p);
+static double parse_unary(Parser* p);
+static double parse_exponent(Parser* p);
+static double parse_primary(Parser* p);
+
+// Apply a named mathematical function to a numeric argument
+// Returns 0.0 if the function name is not recognized
+static double apply_function(const char* name, double n) {
+    // Trigonometric functions (respect degree/radian mode)
+    if (strcmp(name, "sin") == 0) {
+        return degreeMode.mode ? sin(n * PI / 180.0) : sin(n);
+    }
+    if (strcmp(name, "cos") == 0) {
+        return degreeMode.mode ? cos(n * PI / 180.0) : cos(n);
+    }
+    if (strcmp(name, "tan") == 0) {
+        return degreeMode.mode ? tan(n * PI / 180.0) : tan(n);
+    }
+    if (strcmp(name, "cot") == 0) {
+        double t = degreeMode.mode ? tan(n * PI / 180.0) : tan(n);
+        if (fabs(t) < 1e-12) return 0.0; // avoid division by zero
+        return 1.0 / t;
+    }
+
+    // Logarithmic and exponential functions
+    if (strcmp(name, "ln") == 0) {
+        return log(n);
+    }
+    if (strcmp(name, "log") == 0) {
+        return log10(n);
+    }
+    if (strcmp(name, "exp") == 0) {
+        return exp(n);
+    }
+
+    // Other common functions
+    if (strcmp(name, "sqrt") == 0) {
+        return sqrt(n);
+    }
+    if (strcmp(name, "abs") == 0) {
+        return fabs(n);
+    }
+
+    // Inverse trigonometric functions (respect degree/radian mode)
+    if (strcmp(name, "asin") == 0) {
+        double rad = asin(n);
+        return degreeMode.mode ? rad * 180.0 / PI : rad;
+    }
+    if (strcmp(name, "acos") == 0) {
+        double rad = acos(n);
+        return degreeMode.mode ? rad * 180.0 / PI : rad;
+    }
+    if (strcmp(name, "atan") == 0) {
+        double rad = atan(n);
+        return degreeMode.mode ? rad * 180.0 / PI : rad;
+    }
+    if (strcmp(name, "acot") == 0) {
+        double rad = atan(1.0 / n);
+        return degreeMode.mode ? rad * 180.0 / PI : rad;
+    }
+
+    // Random number generation: rand(n) returns integer in [0, n-1]
+    if (strcmp(name, "rand") == 0) {
+        return (double)my_random((int)n);
+    }
+
+    return 0.0; // unknown function
+}
+
+// Parse a primary expression: number, identifier, function call, or parenthesized expression
+static double parse_primary(Parser* p) {
+    // Number literal
+    if (p->current.type == TOK_NUMBER) {
+        double val = p->current.value;
+        next_token(p);
+
+        // Postfix factorial: 5!
+        if (p->current.type == TOK_OP && p->current.text[0] == '!') {
+            next_token(p);
+            return fact((int)val);
+        }
+
+        return val;
+    }
+
+    // Previous result: &
+    if (p->current.type == TOK_OP && p->current.text[0] == '&') {
+        next_token(p);
+        return degreeMode.result;
+    }
+
+    // Identifier: constant or function
+    if (p->current.type == TOK_IDENT) {
+        char name[128];
+        strcpy(name, p->current.text);
+
+        // Constant pi
+        if (strcmp(name, "p") == 0 || strcmp(name, "PI") == 0) {
+            next_token(p);
+            return PI;
+        }
+
+        // Constant e
+        if (strcmp(name, "e") == 0 || strcmp(name, "E") == 0) {
+            next_token(p);
+            return E;
+        }
+
+        // Function call: consume identifier
+        next_token(p);
+
+        if (p->current.type == TOK_LPAREN) {
+            next_token(p); // consume '('
+
+            double arg = parse_expression(p);
+
+            // Consume ')' if present
+            if (p->current.type == TOK_RPAREN) {
+                next_token(p); // consume ')'
+            }
+
+            double val = apply_function(name, arg);
+
+            // Postfix factorial after function: sin(1)!
+            if (p->current.type == TOK_OP && p->current.text[0] == '!') {
+                next_token(p);
+                return fact((int)val);
+            }
+
+            return val;
+        }
+
+        // Unknown identifier or variable x
+        // In graph mode, x should be replaced before parsing
+        if (strcmp(name, "x") == 0) {
+            return 0.0;
+        }
+
+        return 0.0; // unknown identifier
+    }
+
+    // Parenthesized expression
+    if (p->current.type == TOK_LPAREN) {
+        next_token(p); // consume '('
+
+        double val = parse_expression(p);
+
+        if (p->current.type == TOK_RPAREN) {
+            next_token(p); // consume ')'
+        }
+
+        // Postfix factorial after parentheses: (2+3)!
+        if (p->current.type == TOK_OP && p->current.text[0] == '!') {
+            next_token(p);
+            return fact((int)val);
+        }
+
+        return val;
+    }
+
+    return 0.0; // fallback
+}
+
+// Parse exponentiation (^), which is right-associative
+static double parse_exponent(Parser* p) {
+    double base = parse_primary(p);
+
+    // Right-associative exponentiation
+    if (p->current.type == TOK_OP && p->current.text[0] == '^') {
+        next_token(p);
+        double exponent = parse_exponent(p);
+        return pow(base, exponent);
+    }
+
+    return base;
+}
+
+// Parse unary operators: +x, -x, !x (prefix factorial)
+static double parse_unary(Parser* p) {
+    if (p->current.type == TOK_OP) {
+        char op = p->current.text[0];
+
+        if (op == '+' || op == '-' || op == '!') {
+            next_token(p);
+            double operand = parse_unary(p);
+
+            if (op == '+') return operand;
+            if (op == '-') return -operand;
+            if (op == '!') return fact((int)operand);
+        }
+    }
+
+    // If no unary operator, parse exponentiation
+    return parse_exponent(p);
+}
+
+// Parse multiplication and division (left-associative)
+static double parse_term(Parser* p) {
+    double left = parse_unary(p);
+
+    while (p->current.type == TOK_OP &&
+           (p->current.text[0] == '*' || p->current.text[0] == '/')) {
+        char op = p->current.text[0];
+        next_token(p);
+
+        double right = parse_unary(p);
+
+        if (op == '*') {
+            left *= right;
+        }
+        else {
+            // Division by zero protection: set result to 0.0
+            if (right == 0.0) {
+                left = 0.0;
+            }
+            else {
+                left /= right;
+            }
+        }
+    }
+
+    return left;
+}
+
+// Parse addition and subtraction (left-associative)
+static double parse_expression(Parser* p) {
+    double left = parse_term(p);
+
+    while (p->current.type == TOK_OP &&
+           (p->current.text[0] == '+' || p->current.text[0] == '-')) {
+        char op = p->current.text[0];
+        next_token(p);
+
+        double right = parse_term(p);
+
+        if (op == '+') {
+            left += right;
+        }
+        else {
+            left -= right;
+        }
+    }
+
+    return left;
+}
+
+// ====================== SPLIT / EVALUATOR ======================
+
+// Evaluate a mathematical expression string and return the result
+double split(char* input) {
+    if (!input || *input == '\0') {
+        return 0.0;
+    }
+
+    Parser p;
+    p.src = input;
+    p.pos = 0;
+    next_token(&p); // load first token
+
+    return parse_expression(&p);
+}
+
+// ====================== SAVE HISTORY ======================
+
+// Save the entered expression to History.txt
+void save_history(char input[MAX_LINE]) {
+    FILE* f = fopen("History.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", input);
+        fclose(f);
+    }
+}
+
+// Save the calculation result to History.txt
+void save_history1(double result) {
+    FILE* f = fopen("History.txt", "a");
+    if (f) {
+        fprintf(f, "= %.10f\n", result);
+        fclose(f);
+    }
+}
+
+// Store the result in the global degreeMode.result for later use with '&'
+void save_history2(double result1) {
+    degreeMode.result = result1;
+}
+
+// ====================== HELP ======================
+
+// Display detailed help and usage instructions
+void show_help(void) {
+    printf("=== Engineering Calculator - How to Use ===\n\n");
+    printf("1. Calculation (1)\n");
+    printf("2. Show History (2)\n");
+    printf("3. Clear History (3)\n");
+    printf("4. Graph (4)\n");
+    printf("5. Show Graph History (5)\n");
+    printf("e. Exit\n\n");
+
+    printf("Examples:\n");
+    printf(" sin(45) - sin(45 degrees/radians)\n");
+    printf(" sqrt(16) - square root\n");
+    printf(" 3^2 + 5*e - exponentiation + pi & e\n");
+    printf(" !5 - factorial\n");
+    printf(" abs(-3.14) - absolute value\n");
+    printf(" & - previous result\n");
+    printf(" sin(x) - graph mode\n\n");
+
+    printf("After choosing 1, enter 0 for radian or 1 for degree.\n");
+    printf("History and graph history are saved automatically.\n");
+}
+
+// ====================== INPUT BUFFER ======================
+
+// Clear the remaining characters from the standard input buffer
+static void clear_input_buffer(void) {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF) {
+        // discard remaining characters in stdin
+    }
+}
+
+// ====================== DEGREE MODE ======================
+
+// Prompt the user to select angle mode: radian or degree
+void degree(void) {
+    int a = 0;
+    degreeMode.fail = false;
+
+    printf("Angle mode: 0 = Radian (default), 1 = Degree\n");
+
+    // Read user choice
+    if (scanf("%d", &a) != 1) {
+        clear_input_buffer();
+        printf("Invalid input. Default to Radian.\n");
+        degreeMode.fail = true;
+        degreeMode.mode = false;
+        return;
+    }
+
+    clear_input_buffer();
+
+    if (a == 0) {
+        degreeMode.mode = false; // radian mode
+    }
+    else if (a == 1) {
+        degreeMode.mode = true;  // degree mode
+    }
+    else {
+        printf("Invalid input. Default to Radian.\n");
+        degreeMode.fail = true;
+        degreeMode.mode = false;
+    }
+}
+
+// ====================== CALCULATION ======================
+
+// Perform a single calculation based on user input
+void calculation(void) {
+    char input[MAX_LINE];
+
+    // Select angle mode first
+    degree();
+    if (degreeMode.fail) return;
+
+    printf("Enter expression (e.g. 3+sin(45)^2): \n");
+
+    // Read expression from user
+    if (!fgets(input, MAX_LINE, stdin)) {
+        return;
+    }
+
+    // Remove trailing newline character
+    input[strcspn(input, "\n")] = '\0';
+
+    // Save expression to history
+    save_history(input);
+
+    // Evaluate the expression
+    double result = split(input);
+
+    printf("Result = %.10f\n", result);
+
+    // Save result to history and store it for '&' operator
+    save_history1(result);
+    save_history2(result);
+}
+
+// ====================== GRAPH ======================
+
+// Plot an ASCII graph of a function entered by the user
+void graph(void) {
+    char input[MAX_LINE];
+
+    printf("Enter function (e.g. sin(x) or x^2 + 3): \n");
+
+    if (!fgets(input, MAX_LINE, stdin)) {
+        return;
+    }
+
+    input[strcspn(input, "\n")] = '\0';
+
+    double x_min = 0.0, x_max = 0.0;
+
+    // Read x-axis minimum
+    printf("x min: ");
+    if (scanf("%lf", &x_min) != 1) {
+        clear_input_buffer();
+        printf("Invalid input.\n");
+        return;
+    }
+
+    // Read x-axis maximum
+    printf("x max: ");
+    if (scanf("%lf", &x_max) != 1) {
+        clear_input_buffer();
+        printf("Invalid input.\n");
+        return;
+    }
+
+    clear_input_buffer();
+
+    // Validate range
+    if (x_min >= x_max) {
+        printf("Invalid range.\n");
+        return;
+    }
+
+    // Select angle mode for trigonometric functions in graph
+    degree();
+    if (degreeMode.fail) return;
+
+    // Save graph history to GraphHistory.txt
+    FILE* gf = fopen("GraphHistory.txt", "a");
+    if (gf) {
+        fprintf(gf, "Function: %s | x in [%.10f, %.10f]\n", input, x_min, x_max);
+        fclose(gf);
+    }
+
+    double arr[41]; // array to store y-values at 41 sample points
+
+    // Evaluate function at 41 equally spaced x values
+    for (int j = 0; j < 41; j++) {
+        double x = x_min + j * (x_max - x_min) / 40.0;
+        char* new_str = replace_x_with_number(input, x);
+
+        if (new_str) {
+            arr[j] = split(new_str);
+            free(new_str);
+        }
+        else {
+            arr[j] = 0.0;
+        }
+    }
+
+    draw_graph(arr, x_min, x_max);
+}
+
+// Replace every occurrence of 'x' in a string with a numeric value in parentheses
+// Returns a newly allocated string that must be freed by the caller
+char* replace_x_with_number(const char* S, double N) {
+    if (!S) return NULL;
+
+    size_t input_len = strlen(S);
+
+    // Allocate enough space for the worst-case expansion
+    char* result = (char*)malloc(input_len * 60 + 2);
+    if (!result) return NULL;
+
+    char num[60];
+    snprintf(num, sizeof(num), "(%.10f)", N);   // عدد داخل پرانتز (number inside parentheses)
+
+    size_t i = 0, j = 0;
+
+    while (S[i]) {
+        if (S[i] == 'x') {
+            // Check that 'x' is not part of a longer identifier
+            int left_ok = (i == 0 ||
+                           (!isalnum((unsigned char)S[i - 1]) && S[i - 1] != '_'));
+            int right_ok = (S[i + 1] == '\0' ||
+                            (!isalnum((unsigned char)S[i + 1]) && S[i + 1] != '_'));
+
+            if (left_ok && right_ok) {
+                strcpy(&result[j], num);
+                j += strlen(num);
+                i++;
+                continue;
+            }
+        }
+
+        result[j++] = S[i++];
+    }
+
+    result[j] = '\0';
+    return result;
+}
+
+// Draw an ASCII graph from an array of y-values using a simple dot plot
+void draw_graph(double arr[41], double x_min, double x_max) {
+    double min = arr[0];
+    double max = arr[0];
+
+    // Find minimum and maximum y-values
+    for (int i = 1; i < 41; i++) {
+        if (arr[i] < min) min = arr[i];
+        if (arr[i] > max) max = arr[i];
+    }
+
+    // Avoid division by zero for constant functions
+    if (max - min == 0.0) {
+        max = min + 1.0;
+    }
+
+    int height = 20;
+    double value_per_row = (max - min) / height;
+
+    // Draw rows from top to bottom
+    for (int row = height; row >= 0; row--) {
+        double y = min + row * value_per_row;
+        printf("%8.2f |", y);
+
+        // Print '*' at positions where the scaled value matches this row
+        for (int col = 0; col < 41; col++) {
+            int scaled_row = (int)floor((arr[col] - min) / value_per_row + 0.5);
+
+            if (scaled_row == row) {
+                printf("*");
+            } else {
+                printf(" ");
+            }
+        }
+
+        printf("\n");
+    }
+
+    // Draw x-axis line
+    printf("         +");
+    for (int i = 0; i < 41; i++) {
+        printf("-");
+    }
+    printf("\n");
+
+    // Print x-axis labels at intervals
+    printf("          ");
+    for (int i = 0; i < 41; i += 5) {
+        double x = x_min + i * (x_max - x_min) / 40.0;
+        printf("%-5.1f", x);
+    }
+    printf("\n");
+}
+
+// ====================== CLEAR & GRAPH HISTORY ======================
+
+// Delete both calculation and graph history files
+void clearHistory(void) {
+    remove("History.txt");
+    remove("GraphHistory.txt");
+    printf("All history cleared.\n");
+}
+
+// Display the graph history stored in GraphHistory.txt
+void showGraphHistory(void) {
+    FILE* f = fopen("GraphHistory.txt", "r");
+    if (!f) {
+        printf("No graph history found.\n");
+        return;
+    }
+
+    char line[MAX_LINE];
+    while (fgets(line, MAX_LINE, f)) {
+        printf("%s", line);
+    }
+
+    fclose(f);
+}
+
+// ====================== MAIN MENU ======================
+
+// Main menu loop: displays menu, handles user choices, and asks to continue
+void get_choose(void) {
+    char ch;
+
+    while (1) {
+        showMenu();
+        printf("Choice: ");
+
+        if (scanf(" %c", &ch) != 1) {
+            clear_input_buffer();
+            continue;
+        }
+
+        clear_input_buffer();
+
+        if (ch == '0') {
+            show_help();
+        }
+        else if (ch == '1') {
+            calculation();
+        }
+        else if (ch == '2') {
+            showHistory();
+        }
+        else if (ch == '3') {
+            clearHistory();
+        }
+        else if (ch == '4') {
+            graph();
+        }
+        else if (ch == '5') {
+            showGraphHistory();
+        }
+        else if (ch == 'e' || ch == 'E') {
+            break; // exit program
+        }
+        else {
+            printf("Invalid choice!\n");
+        }
+
+        printf("Continue? (y/n): ");
+
+        if (scanf(" %c", &ch) != 1) {
+            clear_input_buffer();
+            break;
+        }
+
+        clear_input_buffer();
+
+        if (ch == 'n' || ch == 'N') {
+            break; // exit program
+        }
+    }
+}
